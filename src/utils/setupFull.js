@@ -16,7 +16,7 @@ async function findOrCreateRole(guild, name, color) {
     const existing = guild.roles.cache.find(r => r.name.toLowerCase() === name.toLowerCase());
     if (existing) return { role: existing, created: false };
     try {
-        const role = await guild.roles.create({ name, color: hexToInt(color), reason: 'NexTiers /setupfull' });
+        const role = await guild.roles.create({ name, colors: { primaryColor: hexToInt(color) }, reason: 'NexTiers /setupfull' });
         await sleep(250);
         return { role, created: true };
     } catch (e) {

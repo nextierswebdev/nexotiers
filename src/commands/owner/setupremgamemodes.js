@@ -43,7 +43,7 @@ module.exports = {
             try {
                 const role = await guild.roles.create({
                     name,
-                    color: hexToInt(color),
+                    colors: { primaryColor: hexToInt(color) },
                     reason: 'NexTiers /setupremgamemodes'
                 });
                 created.push(name);

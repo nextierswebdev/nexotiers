@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, MessageFlags, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags, ChannelType, PermissionFlagsBits, EmbedBuilder } = require('discord.js');
 const config = require('../../config/config');
 const tierSystem = require('../../utils/tierSystem');
 const roleConfig = require('../../utils/roleConfig');
@@ -17,7 +17,7 @@ async function findOrCreateRole(guild, name, color) {
     const existing = guild.roles.cache.find(r => r.name.toLowerCase() === name.toLowerCase());
     if (existing) return { role: existing, created: false };
     try {
-        const role = await guild.roles.create({ name, color: hexToInt(color), reason: 'NexTiers /setupall' });
+        const role = await guild.roles.create({ name, colors: { primaryColor: hexToInt(color) }, reason: 'NexTiers /setupall' });
         await sleep(250);
         return { role, created: true };
     } catch (e) {
@@ -27,21 +27,46 @@ async function findOrCreateRole(guild, name, color) {
 
 async function findOrCreateCategory(guild, name) {
     const existing = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === name.toLowerCase());
-    if (existing) return existing;
-    const cat = await guild.channels.create({ name, type: ChannelType.GuildCategory, reason: 'NexTiers /setupall' });
-    await sleep(250);
-    return cat;
+    if (existing) return { category: existing, created: false };
+    try {
+        const cat = await guild.channels.create({ name, type: ChannelType.GuildCategory, reason: 'NexTiers /setupall' });
+        await sleep(250);
+        return { category: cat, created: true };
+    } catch (e) {
+        return { category: null, created: false, error: e };
+    }
 }
 
 async function findOrCreateTextChannel(guild, name, parent) {
     const existing = guild.channels.cache.find(c => c.type === ChannelType.GuildText && c.name.toLowerCase() === name.toLowerCase());
     if (existing) {
         if (parent && existing.parentId !== parent.id) await existing.setParent(parent).catch(() => {});
-        return existing;
+        return { channel: existing, created: false };
     }
-    const ch = await guild.channels.create({ name, type: ChannelType.GuildText, parent, reason: 'NexTiers /setupall' });
-    await sleep(250);
-    return ch;
+    try {
+        const ch = await guild.channels.create({ name, type: ChannelType.GuildText, parent, reason: 'NexTiers /setupall' });
+        await sleep(250);
+        return { channel: ch, created: true };
+    } catch (e) {
+        return { channel: null, created: false, error: e };
+    }
+}
+
+function chunkFailures(items, maxLen) {
+    const chunks = [];
+    let current = '';
+    for (const item of items) {
+        const line = `- ${item}`;
+        if (current && current.length + line.length + 1 > maxLen) {
+            chunks.push(current);
+            current = line;
+        } else {
+            current = current ? current + '\n' + line : line;
+        }
+    }
+    if (current) chunks.push(current);
+    const total = chunks.length || 1;
+    return chunks.map((c, i) => `Failures (${i + 1}/${total}):\n${c}`);
 }
 
 module.exports = {
@@ -73,9 +98,18 @@ module.exports = {
         const reused = [];
         const failed = [];
 
+        let rolesCreated = 0, rolesReused = 0, rolesFailed = 0, rolesSaved = 0;
+        let categoriesCreated = 0, categoriesReused = 0, categoriesFailed = 0, categoriesSaved = 0;
+        let channelsCreated = 0, channelsReused = 0, channelsFailed = 0;
+        let gamemodesSaved = 0;
+        let tiersSaved = 0;
+        let serverConfigInitSaved = false;
+        let serverConfigFinalSaved = false;
+
         // Ensure server config row
         try {
             await serverConfig.upsertServerConfig(guildId, { guild_name: guild.name, setup_status: 'in_progress' });
+            serverConfigInitSaved = true;
         } catch (e) {
             failed.push('server config init: ' + (e?.message || e));
         }
@@ -84,7 +118,6 @@ module.exports = {
         await interaction.editReply({ content: 'Setting up roles...' });
 
         const roleSpecs = [];
-        // Tierlist Owner
         roleSpecs.push({ key: 'owner', name: 'Tierlist Owner', color: '#F1C40F', category: 'Management' });
         const general = [
             { key: 'admin', name: 'Admin', color: '#E74C3C', category: 'Management' },
@@ -101,22 +134,17 @@ module.exports = {
         ];
         roleSpecs.push(...general);
 
-        // aliases
-        // Tier roles
         for (const gm of FINAL_GAMEMODES) {
             const display = config.gamemodeNames?.[gm] || gm;
             for (const tier of tierSystem.ACTIVE_TIERS) {
                 roleSpecs.push({ key: `tier_${gm}_${tier}`, name: `${display} ${tier}`, color: tierSystem.getTierColor(tier) || '#95A5A6', category: 'Tier', gamemode: gm, tier });
             }
-            // RHT1
             roleSpecs.push({ key: `tier_${gm}_RHT1`, name: `${display} RHT1`, color: tierSystem.getTierColor('HT1') || '#C0392B', category: 'Tier', gamemode: gm, tier: 'RHT1' });
         }
-        // Tester roles
         for (const gm of FINAL_GAMEMODES) {
             const display = config.gamemodeNames?.[gm] || gm;
             roleSpecs.push({ key: `tester_gamemode_${gm}`, name: `${display} Tester`, color: '#5865F2', category: 'Tester', gamemode: gm });
         }
-        // Waitlist roles
         for (const gm of FINAL_GAMEMODES) {
             const display = config.gamemodeNames?.[gm] || gm;
             roleSpecs.push({ key: `waitlist_${gm}`, name: `${display} Waitlist`, color: '#5865F2', category: 'Waitlist', gamemode: gm });
@@ -126,14 +154,20 @@ module.exports = {
         let processed = 0;
         for (const spec of roleSpecs) {
             const { role, created: wasCreated, error } = await findOrCreateRole(guild, spec.name, spec.color);
-            if (error) { failed.push(`${spec.key || spec.name}: ${error?.message || error}`); }
-            else {
-                if (wasCreated) created.push(spec.name); else reused.push(spec.name);
+            if (error) {
+                rolesFailed++;
+                failed.push(`${spec.key || spec.name}: ${error?.message || error}`);
+            } else {
+                if (wasCreated) { rolesCreated++; created.push(spec.name); }
+                else { rolesReused++; reused.push(spec.name); }
                 if (spec.key && role) {
                     roleMap.set(spec.key, role);
                     try {
                         await roleConfig.upsertRoleConfig(spec.key, role.name, spec.category, spec.gamemode || null, spec.tier || null, spec.color, role.id, guildId);
-                    } catch (e) { failed.push(`save ${spec.key}: ${e?.message || e}`); }
+                        rolesSaved++;
+                    } catch (e) {
+                        failed.push(`save ${spec.key}: ${e?.message || e}`);
+                    }
                 }
             }
             processed++;
@@ -144,16 +178,25 @@ module.exports = {
         const priorityRole = guild.roles.cache.find(r => r.name.toLowerCase() === 'priority role');
         if (priorityRole) {
             for (const alias of ['vip', 'booster', 'priority']) {
-                try { await roleConfig.upsertRoleConfig(alias, priorityRole.name, 'Special', null, null, '#' + priorityRole.color.toString(16).padStart(6, '0'), priorityRole.id, guildId); } catch (e) {}
+                try {
+                    await roleConfig.upsertRoleConfig(alias, priorityRole.name, 'Special', null, null, '#' + priorityRole.color.toString(16).padStart(6, '0'), priorityRole.id, guildId);
+                    rolesSaved++;
+                } catch (e) { failed.push(`save ${alias}: ${e?.message || e}`); }
             }
         }
         const verifiedTesterRole = guild.roles.cache.find(r => r.name.toLowerCase() === 'verified tester');
         if (verifiedTesterRole) {
-            try { await roleConfig.upsertRoleConfig('tester', verifiedTesterRole.name, 'Special', null, null, '#' + verifiedTesterRole.color.toString(16).padStart(6, '0'), verifiedTesterRole.id, guildId); } catch (e) {}
+            try {
+                await roleConfig.upsertRoleConfig('tester', verifiedTesterRole.name, 'Special', null, null, '#' + verifiedTesterRole.color.toString(16).padStart(6, '0'), verifiedTesterRole.id, guildId);
+                rolesSaved++;
+            } catch (e) { failed.push(`save tester: ${e?.message || e}`); }
         }
         const srModRole = guild.roles.cache.find(r => r.name.toLowerCase() === 'sr.mod');
         if (srModRole) {
-            try { await roleConfig.upsertRoleConfig('srmod', srModRole.name, 'Management', null, null, '#' + srModRole.color.toString(16).padStart(6, '0'), srModRole.id, guildId); } catch (e) {}
+            try {
+                await roleConfig.upsertRoleConfig('srmod', srModRole.name, 'Management', null, null, '#' + srModRole.color.toString(16).padStart(6, '0'), srModRole.id, guildId);
+                rolesSaved++;
+            } catch (e) { failed.push(`save srmod: ${e?.message || e}`); }
         }
 
         // ---- CATEGORIES ----
@@ -169,10 +212,21 @@ module.exports = {
 
         const categoryMap = new Map();
         for (const spec of categorySpecs) {
-            const cat = await findOrCreateCategory(guild, spec.name);
+            const { category: cat, created: wasCreated, error } = await findOrCreateCategory(guild, spec.name);
+            if (error || !cat) {
+                categoriesFailed++;
+                failed.push(`category ${spec.key}: ${error?.message || error || 'creation failed'}`);
+                continue;
+            }
+            if (wasCreated) { categoriesCreated++; created.push(`category:${spec.key}`); }
+            else { categoriesReused++; reused.push(`category:${spec.key}`); }
             categoryMap.set(spec.key, cat);
-            try { await roleConfig.upsertCategoryConfig(spec.key, cat.name, cat.id, guildId); } catch (e) { failed.push(`category ${spec.key}: ${e?.message || e}`); }
-            if (cat) { created.push(`category:${spec.key}`); }
+            try {
+                await roleConfig.upsertCategoryConfig(spec.key, cat.name, cat.id, guildId);
+                categoriesSaved++;
+            } catch (e) {
+                failed.push(`category ${spec.key}: ${e?.message || e}`);
+            }
         }
 
         const waitlistCat = categoryMap.get('waitlist');
@@ -184,49 +238,62 @@ module.exports = {
         // ---- CHANNELS ----
         await interaction.editReply({ content: 'Setting up channels...' });
 
-        // Waitlist channels per gamemode
-        const waitlistChannels = {}; // channelId -> gamemode
+        const waitlistChannels = {};
         for (const gm of FINAL_GAMEMODES) {
             const chName = `${String(gm).toLowerCase()}-waitlist`;
-            const ch = await findOrCreateTextChannel(guild, chName, waitlistCat);
-            if (ch) {
-                waitlistChannels[ch.id] = gm;
-                reused.push(`channel:${chName}`);
+            const { channel: ch, created: wasCreated, error } = await findOrCreateTextChannel(guild, chName, waitlistCat);
+            if (error || !ch) {
+                channelsFailed++;
+                failed.push(`channel ${chName}: ${error?.message || error || 'creation failed'}`);
+                continue;
             }
+            if (wasCreated) { channelsCreated++; created.push(`channel:${chName}`); }
+            else { channelsReused++; reused.push(`channel:${chName}`); }
+            waitlistChannels[ch.id] = gm;
         }
 
-        // Testing category channels
-        const testerQueueCh = await findOrCreateTextChannel(guild, 'tester-queue', testingCat);
-        const testingMgmtCh = await findOrCreateTextChannel(guild, 'testing-management', testingCat);
-        // High Test category channels
-        const highTestPanelCh = await findOrCreateTextChannel(guild, 'high-test-panel', highTestsCat);
-        const highTestQueueCh = await findOrCreateTextChannel(guild, 'high-test-queue', highTestsCat);
-        const highTestMgmtCh = await findOrCreateTextChannel(guild, 'high-test-management', highTestsCat);
-        // Main channels
-        const resultsCh = await findOrCreateTextChannel(guild, 'results', mainCat);
-        const ticketLogsCh = await findOrCreateTextChannel(guild, 'ticket-logs', mainCat);
-        const transcriptsCh = await findOrCreateTextChannel(guild, 'transcripts', transcriptsCat);
-        const staffMgmtCh = await findOrCreateTextChannel(guild, 'staff-management', mainCat);
-        const testerLbCh = await findOrCreateTextChannel(guild, 'tester-leaderboard', mainCat);
-        const registrationPanelCh = await findOrCreateTextChannel(guild, 'registration-panel', mainCat);
-        const waitlistPanelCh = await findOrCreateTextChannel(guild, 'waitlist-panel', mainCat);
+        async function makeChannel(name, parent, label) {
+            const { channel: ch, created: wasCreated, error } = await findOrCreateTextChannel(guild, name, parent);
+            if (error || !ch) {
+                channelsFailed++;
+                failed.push(`channel ${label || name}: ${error?.message || error || 'creation failed'}`);
+                return null;
+            }
+            if (wasCreated) { channelsCreated++; created.push(`channel:${name}`); }
+            else { channelsReused++; reused.push(`channel:${name}`); }
+            return ch;
+        }
+
+        const testerQueueCh = await makeChannel('tester-queue', testingCat, 'tester-queue');
+        const testingMgmtCh = await makeChannel('testing-management', testingCat, 'testing-management');
+        const highTestPanelCh = await makeChannel('high-test-panel', highTestsCat, 'high-test-panel');
+        const highTestQueueCh = await makeChannel('high-test-queue', highTestsCat, 'high-test-queue');
+        const highTestMgmtCh = await makeChannel('high-test-management', highTestsCat, 'high-test-management');
+        const resultsCh = await makeChannel('results', mainCat, 'results');
+        const ticketLogsCh = await makeChannel('ticket-logs', mainCat, 'ticket-logs');
+        const transcriptsCh = await makeChannel('transcripts', transcriptsCat, 'transcripts');
+        const staffMgmtCh = await makeChannel('staff-management', mainCat, 'staff-management');
+        const testerLbCh = await makeChannel('tester-leaderboard', mainCat, 'tester-leaderboard');
+        const registrationPanelCh = await makeChannel('registration-panel', mainCat, 'registration-panel');
+        const waitlistPanelCh = await makeChannel('waitlist-panel', mainCat, 'waitlist-panel');
 
         // ---- SUPABASE: gamemodes table ----
         await interaction.editReply({ content: 'Saving gamemode configuration...' });
         for (const gm of FINAL_GAMEMODES) {
             const waitlistRoleId = roleMap.get(`waitlist_${gm}`)?.id || null;
-            const emojiRow = null;
             try {
-                await supabase.from('nextiers_gamemodes').upsert({
+                const { error } = await supabase.from('nextiers_gamemodes').upsert({
                     guild_id: guildId,
                     gamemode_name: gm,
                     enabled: true,
                     queue_settings: {},
                     tier_config: {},
                     waitlist_role_id: waitlistRoleId,
-                    gamemode_emoji_id: emojiRow,
+                    gamemode_emoji_id: null,
                     updated_at: new Date().toISOString()
                 }, { onConflict: 'guild_id,gamemode_name' });
+                if (error) throw error;
+                gamemodesSaved++;
             } catch (e) {
                 failed.push(`gamemode ${gm}: ${e?.message || e}`);
             }
@@ -240,7 +307,7 @@ module.exports = {
             for (const gm of FINAL_GAMEMODES) {
                 const roleId = roleMap.get(`tier_${gm}_${tier}`)?.id || null;
                 try {
-                    await supabase.from('nextiers_tiers').upsert({
+                    const { error } = await supabase.from('nextiers_tiers').upsert({
                         guild_id: guildId,
                         tier_name: tier,
                         tier_role_id: roleId,
@@ -248,8 +315,10 @@ module.exports = {
                         tier_order: order,
                         updated_at: new Date().toISOString()
                     }, { onConflict: 'guild_id,tier_name' });
+                    if (error) throw error;
+                    tiersSaved++;
                 } catch (e) {
-                    // may fail due to unique on guild+tier_name only one row per tier; that's fine
+                    failed.push(`tier ${gm} ${tier}: ${e?.message || e}`);
                 }
             }
             order++;
@@ -259,7 +328,7 @@ module.exports = {
         try {
             await serverConfig.upsertServerConfig(guildId, {
                 guild_name: guild.name,
-                setup_status: 'completed',
+                setup_status: failed.length > 0 ? 'incomplete' : 'completed',
                 setup_completed_at: new Date().toISOString(),
                 waitlist_channels: waitlistChannels,
                 results_channel: resultsCh?.id || null,
@@ -282,6 +351,7 @@ module.exports = {
                     waitlist_panel_channel: waitlistPanelCh?.id || null
                 }
             });
+            serverConfigFinalSaved = true;
         } catch (e) {
             failed.push('server config save: ' + (e?.message || e));
         }
@@ -291,6 +361,9 @@ module.exports = {
         let emojiResult = { saved: 0, failed: 0, total: 0 };
         try {
             emojiResult = await emojiManager.saveGuildEmojis(guild);
+            if (emojiResult.failed > 0) {
+                failed.push(`emoji collection: ${emojiResult.failed} failed`);
+            }
         } catch (e) {
             failed.push('emoji collection: ' + (e?.message || e));
         }
@@ -300,21 +373,31 @@ module.exports = {
         serverConfig.clearServerConfigCache(guildId);
         emojiManager.clearEmojiCache(guildId);
 
-        // Finalize setup status if no failures? mark completed regardless but report.
+        // Finalize setup status if failures
         if (failed.length > 0) {
             try { await serverConfig.upsertServerConfig(guildId, { setup_status: 'incomplete' }); } catch (e) {}
         }
 
-        const summary = [
-            '✅ NexTiers /setupall complete.',
-            `Roles created: ${created.filter(x => !x.startsWith('category:') && !x.startsWith('channel:')).length}`,
-            `Roles reused: ${reused.filter(x => !x.startsWith('category:') && !x.startsWith('channel:')).length}`,
-            `Categories/channels created: ${created.filter(x => x.startsWith('category:')).length}`,
-            `Emojis saved: ${emojiResult.saved}/${emojiResult.total}`,
-            `Failures: ${failed.length}`
-        ];
-        if (failed.length > 0) summary.push('', 'Failures:', failed.slice(0, 30).join('\n'));
+        const success = failed.length === 0;
+        const embed = new EmbedBuilder()
+            .setTitle(success ? '✅ NexTiers /setupall complete' : '⚠️ NexTiers /setupall completed with errors')
+            .setColor(success ? 0x2ECC71 : 0xE74C3C)
+            .addFields(
+                { name: 'Roles', value: `Created: ${rolesCreated}\nReused: ${rolesReused}\nSaved: ${rolesSaved}\nFailed: ${rolesFailed}`, inline: true },
+                { name: 'Categories', value: `Created: ${categoriesCreated}\nReused: ${categoriesReused}\nSaved: ${categoriesSaved}\nFailed: ${categoriesFailed}`, inline: true },
+                { name: 'Channels', value: `Created: ${channelsCreated}\nReused: ${channelsReused}\nFailed: ${channelsFailed}`, inline: true },
+                { name: 'Database', value: `Server config init: ${serverConfigInitSaved ? 'OK' : 'ERROR'}\nServer config final: ${serverConfigFinalSaved ? 'OK' : 'ERROR'}\nGamemodes saved: ${gamemodesSaved}/${FINAL_GAMEMODES.length}\nTiers saved: ${tiersSaved}\nEmojis saved: ${emojiResult.saved}/${emojiResult.total}`, inline: false },
+                { name: 'Totals', value: `Created items: ${created.length}\nReused items: ${reused.length}\nTotal failures: ${failed.length}`, inline: true }
+            )
+            .setTimestamp();
 
-        await interaction.editReply({ content: summary.join('\n') });
+        await interaction.editReply({ embeds: [embed], content: '' });
+
+        if (failed.length > 0) {
+            const chunks = chunkFailures(failed, 1700);
+            for (const chunk of chunks) {
+                await interaction.followUp({ content: chunk, flags: MessageFlags.Ephemeral }).catch(() => {});
+            }
+        }
     }
 };
