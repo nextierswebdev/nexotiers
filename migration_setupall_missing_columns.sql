@@ -120,10 +120,24 @@ CREATE TABLE IF NOT EXISTS public.nextiers_tiers (
     UNIQUE (guild_id, tier_name)
 );
 
+ALTER TABLE public.nextiers_tiers ADD COLUMN IF NOT EXISTS gamemode text;
 ALTER TABLE public.nextiers_tiers ADD COLUMN IF NOT EXISTS tier_role_id text;
 ALTER TABLE public.nextiers_tiers ADD COLUMN IF NOT EXISTS tier_points integer NOT NULL DEFAULT 0;
 ALTER TABLE public.nextiers_tiers ADD COLUMN IF NOT EXISTS tier_order integer NOT NULL DEFAULT 0;
 ALTER TABLE public.nextiers_tiers ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+
+-- Fix tier unique constraint: tiers are per guild + gamemode + tier name.
+ALTER TABLE public.nextiers_tiers DROP CONSTRAINT IF EXISTS nextiers_tiers_guild_id_tier_name_key;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'nextiers_tiers_guild_gamemode_tier_key'
+    ) THEN
+        ALTER TABLE public.nextiers_tiers
+            ADD CONSTRAINT nextiers_tiers_guild_gamemode_tier_key
+            UNIQUE (guild_id, gamemode, tier_name);
+    END IF;
+END $$;
 
 -- ============================================================
 -- nextiers_emojis
@@ -147,6 +161,25 @@ ALTER TABLE public.nextiers_emojis ADD COLUMN IF NOT EXISTS mention text;
 ALTER TABLE public.nextiers_emojis ADD COLUMN IF NOT EXISTS gamemode text;
 ALTER TABLE public.nextiers_emojis ADD COLUMN IF NOT EXISTS feature text;
 ALTER TABLE public.nextiers_emojis ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+
+-- ============================================================
+-- nextiers_channel_configs (used by /saveids)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.nextiers_channel_configs (
+    id bigserial PRIMARY KEY,
+    guild_id text NOT NULL,
+    channel_key text NOT NULL,
+    channel_name text,
+    channel_id text NOT NULL,
+    channel_type text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (guild_id, channel_key)
+);
+
+ALTER TABLE public.nextiers_channel_configs ADD COLUMN IF NOT EXISTS channel_name text;
+ALTER TABLE public.nextiers_channel_configs ADD COLUMN IF NOT EXISTS channel_type text;
+ALTER TABLE public.nextiers_channel_configs ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
 -- Refresh PostgREST schema cache (Supabase)
 NOTIFY pgrst, 'reload schema';

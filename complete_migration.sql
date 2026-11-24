@@ -146,14 +146,28 @@ CREATE TRIGGER nextiers_gamemodes_updated_at
 CREATE TABLE IF NOT EXISTS public.nextiers_tiers (
     id bigserial PRIMARY KEY,
     guild_id text NOT NULL REFERENCES public.nextiers_server_configs(guild_id) ON DELETE CASCADE,
+    gamemode text,
     tier_name text NOT NULL,
     tier_role_id text,
     tier_points integer NOT NULL DEFAULT 0,
     tier_order integer NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (guild_id, tier_name)
+    UNIQUE (guild_id, gamemode, tier_name)
 );
+
+ALTER TABLE public.nextiers_tiers ADD COLUMN IF NOT EXISTS gamemode text;
+ALTER TABLE public.nextiers_tiers DROP CONSTRAINT IF EXISTS nextiers_tiers_guild_id_tier_name_key;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'nextiers_tiers_guild_gamemode_tier_key'
+    ) THEN
+        ALTER TABLE public.nextiers_tiers
+            ADD CONSTRAINT nextiers_tiers_guild_gamemode_tier_key
+            UNIQUE (guild_id, gamemode, tier_name);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS nextiers_tiers_guild_id_idx ON public.nextiers_tiers (guild_id);
 
@@ -327,6 +341,28 @@ CREATE TABLE IF NOT EXISTS public.high_test_staff_roles (
 );
 
 ALTER TABLE public.high_test_staff_roles ADD COLUMN IF NOT EXISTS guild_id text;
+
+-- ============================================================
+-- Channel configuration (per guild)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.nextiers_channel_configs (
+    id bigserial PRIMARY KEY,
+    guild_id text NOT NULL REFERENCES public.nextiers_server_configs(guild_id) ON DELETE CASCADE,
+    channel_key text NOT NULL,
+    channel_name text,
+    channel_id text NOT NULL,
+    channel_type text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (guild_id, channel_key)
+);
+
+CREATE INDEX IF NOT EXISTS nextiers_channel_configs_guild_id_idx ON public.nextiers_channel_configs (guild_id);
+
+DROP TRIGGER IF EXISTS nextiers_channel_configs_updated_at ON public.nextiers_channel_configs;
+CREATE TRIGGER nextiers_channel_configs_updated_at
+    BEFORE UPDATE ON public.nextiers_channel_configs
+    FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 -- ============================================================
 -- Optional RPC: refresh server config cache is client-side.

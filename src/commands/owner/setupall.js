@@ -309,12 +309,13 @@ module.exports = {
                 try {
                     const { error } = await supabase.from('nextiers_tiers').upsert({
                         guild_id: guildId,
+                        gamemode: gm,
                         tier_name: tier,
                         tier_role_id: roleId,
                         tier_points: points,
                         tier_order: order,
                         updated_at: new Date().toISOString()
-                    }, { onConflict: 'guild_id,tier_name' });
+                    }, { onConflict: 'guild_id,gamemode,tier_name' });
                     if (error) throw error;
                     tiersSaved++;
                 } catch (e) {
