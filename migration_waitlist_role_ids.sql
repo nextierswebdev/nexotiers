@@ -1,0 +1,2 @@
+-- Legacy seed migration is disabled for the multi-guild role system.
+-- Role IDs are now created per guild via /setupall and saved via /saveroleids.
